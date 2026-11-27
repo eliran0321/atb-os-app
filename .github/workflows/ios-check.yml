@@ -129,7 +129,7 @@ jobs:
       # -curtainWait מחזיק את הפריים הראשון ו-curtainHold את המסך כולו (SceneDelegate.swift),
       # כדי שהפתיחה תיכנס לצילומים: הפריים הראשון, המסך המלא, ואז הדף של המערכת
       - name: Launch and record
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           APP=$(find "$RUNNER_TEMP/sim/Build/Products" -maxdepth 2 -name 'App.app' | head -1)
           test -d "$APP"
@@ -163,6 +163,17 @@ jobs:
               sleep 1
             done
             kill -9 "$recorder" 2>/dev/null || true
+            # -openPath ממשיך לדף אחר אחרי מסך הפתיחה: מסך הכניסה, שמקבל את כל המסך,
+            # ודף רגיל של המערכת, שנשאר בין הרצועה שמאחורי השעה לפס שמתחתיו
+            for page in login privacy; do
+              xcrun simctl terminate "$device" il.co.all4fun.atb || true
+              sleep 1
+              xcrun simctl launch "$device" il.co.all4fun.atb -curtainHold 1 -openPath "$page"
+              sleep 22
+              xcrun simctl io "$device" screenshot "launch/$name-4-$page.png" || true
+              sleep 10
+              xcrun simctl io "$device" screenshot "launch/$name-5-$page-later.png" || true
+            done
             xcrun simctl shutdown "$device" || true
           }
           look phone "$PHONE"

@@ -43,6 +43,15 @@ class MainViewController: CAPBridgeViewController {
     /// The message with which the first page says that it has drawn itself.
     private static let drawnMessage = "atbPageDrawn"
 
+    // The edges of the screen: behind the clock, and under the page (applyEdges below).
+    private var strip: UIView?
+    private var pageCovers = false
+    /// The message with which a page says whether it takes the whole screen.
+    private static let edgesMessage = "atbPageEdges"
+    /// What is left under a page that stays inside the safe area: room for the line
+    /// at the bottom of the screen, and no more.
+    private static let bottomBand: CGFloat = 16
+
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
         // The sign-in key of this device, for the page to use (BiometricKeyPlugin below).
@@ -111,6 +120,60 @@ class MainViewController: CAPBridgeViewController {
         scripts.addUserScript(WKUserScript(source: drawn, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         scripts.add(PageListener { [weak self] path in self?.firstPageDrawn(path) }, name: Self.drawnMessage)
 
+        // A page says whether it takes the whole screen: `viewport-fit=cover` in its
+        // viewport, as in Safari. It is told as soon as the head of the page has it, so
+        // that the edges are right before the page is drawn, and again when a page
+        // changes it without a load. "Not cover" waits for the whole head, which is
+        // where the answer is.
+        let edges = """
+        (function () {
+          var handlers = window.webkit && window.webkit.messageHandlers;
+          var listener = handlers && handlers.\(Self.edgesMessage);
+          if (!listener) return;
+          var known = null;
+          var parsed = document.readyState !== 'loading';
+          function tell() {
+            var meta = document.querySelector('meta[name="viewport"]');
+            var fit = meta ? (meta.getAttribute('content') || '').split(' ').join('') : '';
+            var cover = fit.indexOf('viewport-fit=cover') >= 0;
+            if (!cover && !parsed) return;
+            if (cover === known) return;
+            known = cover;
+            listener.postMessage(cover ? 'cover' : 'contain');
+          }
+          function watch() {
+            new MutationObserver(tell).observe(document.head, {
+              childList: true, subtree: true, attributes: true, attributeFilter: ['content']
+            });
+            tell();
+          }
+          if (document.head) {
+            watch();
+          } else {
+            var early = new MutationObserver(function () {
+              if (!document.head) return;
+              early.disconnect();
+              watch();
+            });
+            early.observe(document.documentElement, { childList: true });
+          }
+          document.addEventListener('DOMContentLoaded', function () {
+            parsed = true;
+            tell();
+          });
+        })();
+        """
+        scripts.addUserScript(WKUserScript(source: edges, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        scripts.add(PageListener { [weak self] fit in self?.pageEdges(cover: fit == "cover") }, name: Self.edgesMessage)
+
+        // The soft blur that iOS 26 puts where content meets the top and the bottom of
+        // a scrolling view lightened the ink behind the clock. The pages draw their own
+        // edges.
+        if #available(iOS 26.0, *) {
+            webView.scrollView.topEdgeEffect.isHidden = true
+            webView.scrollView.bottomEdgeEffect.isHidden = true
+        }
+
         // There is no back button in the shell: an edge swipe goes back, as in the browser.
         webView.allowsBackForwardNavigationGestures = true
 
@@ -129,6 +192,7 @@ class MainViewController: CAPBridgeViewController {
         // An ink strip behind the clock and the battery. The status bar text is white on
         // every screen, and some pages of the system are light: without the strip the
         // clock would disappear on them, and scrolled content would show through it.
+        // A page that takes the whole screen draws there itself (applyEdges).
         let strip = UIView()
         strip.backgroundColor = ink
         strip.isUserInteractionEnabled = false
@@ -140,8 +204,42 @@ class MainViewController: CAPBridgeViewController {
             strip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             strip.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
         ])
+        self.strip = strip
 
         coverLaunch()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // The safe area is known only in a window, and changes when the device turns.
+        applyEdges()
+    }
+
+    private func pageEdges(cover: Bool) {
+        guard cover != pageCovers else { return }
+        pageCovers = cover
+        applyEdges()
+    }
+
+    /// Two kinds of pages. A page that declares `viewport-fit=cover` gets the whole
+    /// screen, as in Safari: it draws behind the clock and down to the bottom edge, and
+    /// keeps its own content clear of them (env(safe-area-inset-*)). Any other page
+    /// stays inside the safe area, between the ink strip behind the clock and a band
+    /// under it. That band is the whole safe area of the device by default, twice what
+    /// the line at the bottom needs, and it left the bottom menu of the system standing
+    /// high above the edge; here it is only as tall as the line needs.
+    private func applyEdges() {
+        guard let webView = webView else { return }
+        strip?.isHidden = pageCovers
+        let behavior: UIScrollView.ContentInsetAdjustmentBehavior = pageCovers ? .never : .always
+        if webView.scrollView.contentInsetAdjustmentBehavior != behavior {
+            webView.scrollView.contentInsetAdjustmentBehavior = behavior
+        }
+        let device = view.window?.safeAreaInsets.bottom ?? 0
+        let lower = pageCovers ? 0 : min(0, Self.bottomBand - device)
+        if additionalSafeAreaInsets.bottom != lower {
+            additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: lower, right: 0)
+        }
     }
 
     /// The web view starts empty, and the first page comes over the network. Until it
@@ -208,6 +306,15 @@ class MainViewController: CAPBridgeViewController {
         pageLoading = nil
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.drawnMessage)
         curtain.lift()
+
+        // `-openPath <path>` at launch goes on to another page of the system, to look at
+        // it in the simulator (.github/workflows/ios-check.yml). Nobody else passes it.
+        if let path = UserDefaults.standard.string(forKey: "openPath"), !path.isEmpty,
+           let base = bridge?.config.serverURL {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.webView?.load(URLRequest(url: base.appendingPathComponent(path)))
+            }
+        }
     }
 }
 
@@ -335,15 +442,19 @@ final class LaunchCurtain: UIView {
     }
 
     /// The numbers are the numbers of the opening page (src/app/start/page.tsx in the
-    /// system), measured the way the web view measures them: the page is the screen
-    /// without the safe areas, "vw" and "vh" are the whole screen, and one "rem" is
-    /// 15 points on a phone and 16 on anything wider (globals.css).
+    /// system), measured the way the web view measures them. The page takes the whole
+    /// screen (viewport-fit=cover there): its lights and its faint balls go from edge to
+    /// edge, and its content is padded away from the safe areas of the device. "vw" and
+    /// "vh" are the whole screen, and one "rem" is 15 points on a phone and 16 on
+    /// anything wider (globals.css).
     override func layoutSubviews() {
         super.layoutSubviews()
         let width = bounds.width
         let height = bounds.height
         guard width > 0, height > 0 else { return }
-        let safe = safeAreaInsets
+        // The safe areas of the device itself: the screen lowers its own bottom one
+        // for pages that stay inside it, and this page does not.
+        let safe = window?.safeAreaInsets ?? safeAreaInsets
         let page = CGRect(x: safe.left, y: safe.top,
                           width: width - safe.left - safe.right,
                           height: height - safe.top - safe.bottom)
@@ -353,7 +464,7 @@ final class LaunchCurtain: UIView {
         let tablet = page.width >= 640 && !wide
         let rem: CGFloat = page.width < 640 ? 15 : 16
         // A phone on its side has no room for the elephant.
-        let low = page.height <= 520
+        let low = height <= 520
 
         let top = max(2 * rem, 0.06 * height)
         let foot = 1.75 * rem
@@ -386,12 +497,12 @@ final class LaunchCurtain: UIView {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backdrop.frame = page
-        glowTop.frame = CGRect(x: page.width - 34 * rem, y: -26 * rem, width: 68 * rem, height: 52 * rem)
-        glowBottom.frame = CGRect(x: -30 * rem, y: page.height - 24 * rem, width: 60 * rem, height: 48 * rem)
+        backdrop.frame = bounds
+        glowTop.frame = CGRect(x: width - 34 * rem, y: -26 * rem, width: 68 * rem, height: 52 * rem)
+        glowBottom.frame = CGRect(x: -30 * rem, y: height - 24 * rem, width: 60 * rem, height: 48 * rem)
         for (ball, spec) in zip(balls, Self.edgeBalls) {
             ball.resize(spec.size / 100 * min(width, height))
-            ball.layer.position = CGPoint(x: spec.x / 100 * page.width, y: spec.y / 100 * page.height)
+            ball.layer.position = CGPoint(x: spec.x / 100 * width, y: spec.y / 100 * height)
         }
 
         logo.bounds = CGRect(x: 0, y: 0, width: logoWidth, height: logoHeight)

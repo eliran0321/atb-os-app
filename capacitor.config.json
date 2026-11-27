@@ -10,7 +10,7 @@
   "ios": {
     "contentInset": "always",
     "backgroundColor": "#2a1247",
-    "appendUserAgent": "ATBApp"
+    "appendUserAgent": "ATBApp ATBCover"
   },
   "plugins": {
     "PushNotifications": {
