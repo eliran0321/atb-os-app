@@ -29,15 +29,18 @@ function token() {
   return `${head}.${body}.${b64url(sig)}`
 }
 
-/** קריאה אחת ל-API. שגיאה נזרקת עם הפירוט של אפל, בלי הטוקן */
-export async function asc(method, path, data) {
+/**
+ * קריאה אחת ל-API. שגיאה נזרקת עם הפירוט של אפל, בלי הטוקן. included: משאבים
+ * שנוצרים יחד עם הראשי (מחיר, זמינות לפי מדינה)
+ */
+export async function asc(method, path, data, included) {
   const res = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token()}`,
       ...(data ? { 'Content-Type': 'application/json' } : {}),
     },
-    body: data ? JSON.stringify({ data }) : undefined,
+    body: data ? JSON.stringify(included ? { data, included } : { data }) : undefined,
   })
   const text = await res.text()
   const json = text ? JSON.parse(text) : {}

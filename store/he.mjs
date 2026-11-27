@@ -1,0 +1,45 @@
+// הטקסטים של דף האפליקציה בחנות של אפל (עברית). אורכים: כותרת משנה עד 30,
+// מילות מפתח עד 100, טקסט קידום עד 170
+export const LISTING = {
+  subtitle: 'השוברים והאירועים שלך ב-ATB',
+  privacyPolicyUrl: 'https://atb-os.all4fun.co.il/privacy',
+  supportUrl: 'https://www.all4fun.co.il/contact',
+  marketingUrl: 'https://www.all4fun.co.il',
+  copyright: '2026 ATB באולינג',
+  primaryCategory: 'ENTERTAINMENT',
+  secondaryCategory: 'SPORTS',
+  // המדינות שבהן האפליקציה זמינה (קוד של אפל). רק ישראל: עסק מקומי בעברית
+  territories: ['ISR'],
+  keywords: 'באולינג,שוברים,יום הולדת,אירועים,כרטיסייה,חדרה,בילוי,מסלולים,all4fun,משמרות',
+  promotionalText: 'השוברים, הצעות המחיר ופרטי האירוע שלך ב-ATB באולינג, תמיד בטלפון.',
+  description: [
+    'האפליקציה של ATB באולינג, מרכז פנאי ובילוי בחדרה.',
+    '',
+    'ללקוחות',
+    '• כל השוברים שלך במקום אחד: מציגים את הברקוד בקבלה ומשחקים.',
+    '• רואים כמה משחקים נשארו ועד מתי השובר בתוקף.',
+    '• מעבירים שובר לחבר או לבן משפחה בכמה לחיצות.',
+    '• הצעות המחיר שלך: קוראים, חותמים ומשריינים את התאריך מהטלפון.',
+    '• דף האירוע: שעות, לוח זמנים, מה כלול ואיך מגיעים.',
+    '',
+    'לצוות של ATB',
+    '• סידור עבודה, הגשת זמינות והחלפת משמרות.',
+    '• אירועי היום, משימות וצ\'קליסטים.',
+    '• סריקת שוברים במצלמה.',
+    '• התראות לטלפון וכניסה בזיהוי פנים.',
+    '',
+    'הכניסה ללקוחות היא במספר הטלפון ובקוד חד פעמי שנשלח בוואטסאפ. הכניסה לצוות היא בחשבון שמקבלים מההנהלה.',
+  ].join('\n'),
+}
+// הערות לבודק של אפל (באנגלית). פרטי הקשר וחשבונות ההדגמה ממולאים בממשק
+export const REVIEW_NOTES = [
+  'ATB-OS is the app of ATB Bowling, an entertainment center in Hadera, Israel. The interface is in Hebrew (right to left).',
+  '',
+  'The first screen offers two entrances:',
+  '1. Customers (the lime tile on the right): sign in with a phone number and a one-time code sent by WhatsApp. Customers see their vouchers with a QR code that is scanned at the front desk, transfer a voucher to another phone number, and open their quotes and event pages.',
+  '2. Staff (the purple tile on the left): sign in with phone or email and a password. Staff see their shifts, tasks and checklists, scan customer vouchers with the camera and receive push notifications.',
+  '',
+  'Native features: push notifications (APNs), Face ID sign-in backed by a key in the Secure Enclave, camera scanning of vouchers, and Quick Look preview with share for exported files (PDF, Excel).',
+  '',
+  'Vouchers are redeemed in person at the venue for bowling games. Nothing is sold inside the app.',
+].join('\n')
