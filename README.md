@@ -8,6 +8,8 @@
 - `scripts/asc-setup.mjs` - הכנה חד-פעמית של החתימה מול אפל, בלי מק.
 - `scripts/configure-ios.py` - ההתאמות של פרויקט האייפון אחרי `cap add ios`.
 - `scripts/make-assets.mjs` - האייקון ומסך הפתיחה מנכסי המותג.
-- `.github/workflows/ios.yml` - בנייה על macOS בענן והעלאה ל-TestFlight.
+- `.github/workflows/ios.yml` - בנייה על macOS בענן והעלאה ל-TestFlight, בכל דחיפה ל-main.
+- `.github/workflows/ios-check.yml` - בדיקת קומפילציה בלי חתימה ובלי העלאה, בכל דחיפה לענף אחר.
+  קוד חדש של המעטפת נדחף קודם לענף, ורק כשהבדיקה עוברת הוא נכנס ל-main.
 
 אין כאן מפתחות, תעודות או סיסמאות: הם שמורים מחוץ לריפו וב-Secrets.

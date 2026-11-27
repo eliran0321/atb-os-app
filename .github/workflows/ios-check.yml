@@ -1,0 +1,65 @@
+# בודק שאפליקציית האייפון מתקמפלת, בלי חתימה ובלי העלאה.
+# כל דחיפה ל-main היא בנייה חדשה ב-TestFlight (ios.yml), ואין מק בבית לבדוק
+# לפניה. לכן קוד חדש של המעטפת נדחף קודם לענף אחר, ורק כשהבדיקה כאן עוברת
+# הוא נכנס ל-main.
+name: iOS check
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'ios/**'
+      - 'capacitor.config.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/ios-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Select the newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Sync the Capacitor project
+        run: npx cap sync ios
+
+      # אותה תצורה ואותו יעד כמו בבנייה האמיתית, רק בלי חתימה
+      - name: Compile
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee "$RUNNER_TEMP/build.log" | xcbeautify --quiet
+
+      - name: Show the end of the build log
+        if: failure()
+        run: tail -n 150 "$RUNNER_TEMP/build.log" || true

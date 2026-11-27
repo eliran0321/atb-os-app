@@ -1,5 +1,6 @@
 import UIKit
 import WebKit
+import QuickLook
 import LocalAuthentication
 import Security
 import Capacitor
@@ -37,6 +38,8 @@ class MainViewController: CAPBridgeViewController {
         super.capacitorDidLoad()
         // The sign-in key of this device, for the page to use (BiometricKeyPlugin below).
         bridge?.registerPluginInstance(BiometricKeyPlugin())
+        // A file of the system (an Excel export, a PDF), shown by the device (FileViewerPlugin below).
+        bridge?.registerPluginInstance(FileViewerPlugin())
 
         guard let webView = webView else { return }
 
@@ -237,5 +240,83 @@ public class BiometricKeyPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func remove(_ call: CAPPluginCall) {
         SecItemDelete(query() as CFDictionary)
         call.resolve()
+    }
+}
+
+/// A file of the system, shown on the device: an Excel export, a quote as a PDF. A web
+/// view has no downloads of its own, so a tap on such a file led nowhere. The page
+/// fetches the file with the session it already has and hands the bytes over; the
+/// system preview shows it, and its share button is where saving to Files, printing
+/// and sending live.
+///
+/// As with the sign-in key, the plugin knows nothing about the file: it gets a name and
+/// bytes. Which taps lead here is decided in the web app, where it can be tested and
+/// fixed without shipping a new build.
+@objc(FileViewerPlugin)
+public class FileViewerPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "FileViewerPlugin"
+    public let jsName = "FileViewer"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "open", returnType: CAPPluginReturnPromise)
+    ]
+
+    private let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("files", isDirectory: true)
+    private var shown: URL?
+
+    /// The files of the previous run go when the app starts. Within a run they stay:
+    /// a share that is still copying a file must not lose it.
+    override public func load() {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    @objc func open(_ call: CAPPluginCall) {
+        guard let text = call.getString("data"), let data = Data(base64Encoded: text) else {
+            call.reject("data", "FAILED")
+            return
+        }
+        // A name, never a path: nothing the page sends can point outside the folder.
+        var name = (call.getString("name") ?? "").replacingOccurrences(of: "/", with: "-")
+        if name.isEmpty || name == "." || name == ".." { name = "file" }
+        // A folder for each file, so that the name on screen is exactly the name the
+        // page gave, also when the same export is opened twice.
+        let url = folder
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try data.write(to: url)
+        } catch {
+            call.reject(error.localizedDescription, "FAILED")
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, var top = self.bridge?.viewController else {
+                call.reject("no screen", "FAILED")
+                return
+            }
+            while let above = top.presentedViewController, !above.isBeingDismissed {
+                top = above
+            }
+            self.shown = url
+            let preview = QLPreviewController()
+            preview.dataSource = self
+            top.present(preview, animated: true) { call.resolve() }
+        }
+    }
+}
+
+// The conformance lives in an extension, as with the window opener above: only these
+// two methods run on the main actor, and open(_:) stays callable from the bridge queue.
+extension FileViewerPlugin: QLPreviewControllerDataSource {
+    public func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+        return shown == nil ? 0 : 1
+    }
+
+    public func previewController(_ controller: QLPreviewController,
+                                  previewItemAt index: Int) -> QLPreviewItem {
+        return (shown ?? folder) as NSURL
     }
 }
