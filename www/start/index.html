@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ATB</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #2a1247;
+        color: #fff;
+        font-family: -apple-system, system-ui, 'Segoe UI', Arial, sans-serif;
+      }
+      main {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 24px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+      img {
+        width: 190px;
+        height: auto;
+      }
+      p {
+        margin: 0;
+        font-size: 19px;
+        font-weight: 700;
+      }
+      button {
+        min-height: 48px;
+        padding: 0 28px;
+        border: 0;
+        border-radius: 12px;
+        background: #d7ff00;
+        color: #2a1247;
+        font: inherit;
+        font-size: 17px;
+        font-weight: 800;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="../logo.png" alt="ATB" />
+      <p>אין חיבור לאינטרנט</p>
+      <button type="button" id="retry">ניסיון נוסף</button>
+    </main>
+    <script>
+      // המעטפת מציגה את הדף הזה כשהמערכת לא נטענה; ניסיון נוסף חוזר למסך הפתיחה
+      var START = 'https://atb-os.all4fun.co.il/start'
+      document.getElementById('retry').addEventListener('click', function () {
+        window.location.href = START
+      })
+      window.addEventListener('online', function () {
+        window.location.href = START
+      })
+    </script>
+  </body>
+</html>

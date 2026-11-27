@@ -1,0 +1,20 @@
+{
+  "appId": "il.co.all4fun.atb",
+  "appName": "ATB-OS",
+  "webDir": "www",
+  "server": {
+    "url": "https://atb-os.all4fun.co.il",
+    "appStartPath": "start",
+    "errorPath": "offline.html"
+  },
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#2a1247",
+    "appendUserAgent": "ATBApp"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
+  }
+}

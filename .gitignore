@@ -1,0 +1,17 @@
+node_modules/
+
+# מפתחות ותעודות לא נכנסים לריפו. הם בתיקייה נפרדת במחשב וב-Secrets של גיטהאב
+*.keystore
+*.jks
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.csr
+*.mobileprovision
+
+# פרויקט האנדרואיד ייכנס כשהבנייה שלו תאומת
+android/
+
+.DS_Store

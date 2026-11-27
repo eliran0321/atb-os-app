@@ -1,0 +1,19 @@
+{
+  "name": "atb-os-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ATB-OS app shells for the stores, around the live web app",
+  "scripts": {
+    "ios:sync": "cap sync ios",
+    "ios:setup": "node scripts/asc-setup.mjs",
+    "ios:status": "node scripts/asc-app.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.3"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.6.3",
+    "@capacitor/ios": "^8.6.3",
+    "@capacitor/push-notifications": "^8.1.3"
+  }
+}
