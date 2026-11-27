@@ -51,6 +51,7 @@ if 'ITSAppUsesNonExemptEncryption' not in s:
     pairs = [
         ('CFBundleLocalizations', '<array>\n\t\t<string>he</string>\n\t</array>'),
         ('ITSAppUsesNonExemptEncryption', '<false/>'),
+        ('NSFaceIDUsageDescription', '<string>זיהוי הפנים משמש לכניסה למערכת בלי סיסמה.</string>'),
         ('NSCameraUsageDescription', '<string>המצלמה משמשת לסריקת שוברים וברקודים ולצילום תמונות שמעלים למערכת.</string>'),
         ('NSMicrophoneUsageDescription', '<string>המיקרופון משמש רק כשמצלמים סרטון שמעלים למערכת.</string>'),
         ('NSPhotoLibraryAddUsageDescription', '<string>שמירת תמונה מהמערכת לגלריה, למשל שובר.</string>'),

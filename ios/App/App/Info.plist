@@ -80,5 +80,7 @@
 	<string>שמירת תמונה מהמערכת לגלריה, למשל שובר.</string>
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleLightContent</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>זיהוי הפנים משמש לכניסה למערכת בלי סיסמה.</string>
 </dict>
 </plist>

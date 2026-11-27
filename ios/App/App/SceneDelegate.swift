@@ -1,5 +1,7 @@
 import UIKit
 import WebKit
+import LocalAuthentication
+import Security
 import Capacitor
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
@@ -33,6 +35,9 @@ class MainViewController: CAPBridgeViewController {
 
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
+        // The sign-in key of this device, for the page to use (BiometricKeyPlugin below).
+        bridge?.registerPluginInstance(BiometricKeyPlugin())
+
         guard let webView = webView else { return }
 
         // There is no back button in the shell: an edge swipe goes back, as in the browser.
@@ -103,5 +108,134 @@ extension SameAppWindowOpener: WKUIDelegate {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
         return nil
+    }
+}
+
+/// The sign-in key of this device. The private key is created inside the Secure Enclave
+/// and never leaves it; it signs only after the system has matched the face or the
+/// fingerprint that are enrolled right now. The page asks for a signature over a login
+/// challenge from the server, and the server checks it against the public key it stored
+/// when the user turned this on. No password and no token are kept on the device.
+///
+/// The plugin knows nothing about the login itself: it creates a key, hands out the
+/// public half, and signs bytes. Everything else lives in the web app, where it can be
+/// tested and fixed without shipping a new build.
+@objc(BiometricKeyPlugin)
+public class BiometricKeyPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "BiometricKeyPlugin"
+    public let jsName = "BiometricKey"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "status", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "create", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sign", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "remove", returnType: CAPPluginReturnPromise)
+    ]
+
+    private let tag = Data("il.co.all4fun.atb.sign-in-key".utf8)
+
+    private func query(_ extra: [String: Any] = [:]) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom
+        ]
+        for (name, value) in extra { query[name] = value }
+        return query
+    }
+
+    /// Finding the key never asks for the face; only signing with it does.
+    private func storedKey(using context: LAContext? = nil) -> SecKey? {
+        var extra: [String: Any] = [kSecReturnRef as String: true]
+        if let context = context { extra[kSecUseAuthenticationContext as String] = context }
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query(extra) as CFDictionary, &item) == errSecSuccess,
+              let found = item else { return nil }
+        // swiftlint:disable:next force_cast
+        return (found as! SecKey)
+    }
+
+    /// The public half as the uncompressed point: 04, X, Y.
+    private func publicKey(of key: SecKey) -> String? {
+        guard let publicKey = SecKeyCopyPublicKey(key),
+              let data = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else { return nil }
+        return data.base64EncodedString()
+    }
+
+    /// Whether the device can do this at all, and the key it already holds, if any.
+    @objc func status(_ call: CAPPluginCall) {
+        var result: [String: Any] = [
+            "available": LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        ]
+        if let key = storedKey(), let publicKey = publicKey(of: key) {
+            result["publicKey"] = publicKey
+        }
+        call.resolve(result)
+    }
+
+    /// A new key replaces the previous one. biometryCurrentSet: enrolling another face or
+    /// finger later makes the key unusable, and the user turns sign-in on again.
+    @objc func create(_ call: CAPPluginCall) {
+        SecItemDelete(query() as CFDictionary)
+        guard let access = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+            [.privateKeyUsage, .biometryCurrentSet],
+            nil
+        ) else {
+            call.reject("access control", "FAILED")
+            return
+        }
+        let privateKey: [String: Any] = [
+            kSecAttrIsPermanent as String: true,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrAccessControl as String: access
+        ]
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs as String: privateKey
+        ]
+        guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, nil),
+              let publicKey = publicKey(of: key) else {
+            call.reject("key generation", "FAILED")
+            return
+        }
+        call.resolve(["publicKey": publicKey])
+    }
+
+    /// Signs the given bytes (ECDSA over SHA-256, DER). This is where the system shows
+    /// Face ID or Touch ID; it blocks, so it runs off the main thread.
+    @objc func sign(_ call: CAPPluginCall) {
+        guard let text = call.getString("data"), let data = Data(base64Encoded: text) else {
+            call.reject("data", "FAILED")
+            return
+        }
+        let context = LAContext()
+        context.localizedReason = call.getString("reason") ?? ""
+        guard let key = storedKey(using: context) else {
+            call.reject("no key", "NO_KEY")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: Unmanaged<CFError>?
+            guard let signature = SecKeyCreateSignature(
+                key, .ecdsaSignatureMessageX962SHA256, data as CFData, &failure
+            ) as Data? else {
+                let code = failure.map { CFErrorGetCode($0.takeRetainedValue()) } ?? 0
+                let canceled = code == Int(errSecUserCanceled)
+                    || code == LAError.Code.userCancel.rawValue
+                    || code == LAError.Code.appCancel.rawValue
+                    || code == LAError.Code.systemCancel.rawValue
+                call.reject("not signed", canceled ? "CANCELED" : "FAILED")
+                return
+            }
+            call.resolve(["signature": signature.base64EncodedString()])
+        }
+    }
+
+    @objc func remove(_ call: CAPPluginCall) {
+        SecItemDelete(query() as CFDictionary)
+        call.resolve()
     }
 }
