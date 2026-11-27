@@ -63,3 +63,121 @@ jobs:
       - name: Show the end of the build log
         if: failure()
         run: tail -n 150 "$RUNNER_TEMP/build.log" || true
+
+  # מה שרואים כשהאפליקציה נפתחת: בנייה לסימולטור, פתיחה באייפון ובאייפד, וצילומים
+  # וסרטון כקבצים של הריצה (launch). אין מק ואין אייפון ליד המחשב, וזו הדרך היחידה
+  # לראות קוד של המעטפת לפני שהוא מגיע ל-TestFlight
+  look:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Select the newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Sync the Capacitor project
+        run: npx cap sync ios
+
+      # אייפון, אייפד של 11 אינץ' ואייפד של 13: שלוש הפריסות של מסך הפתיחה
+      - name: Pick the simulators
+        run: |
+          xcrun simctl list devices available
+          pick() {
+            xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          want, must = sys.argv[1], sys.argv[2]
+          runtimes = json.load(sys.stdin)["devices"]
+          def version(key):
+              return [int(n) for n in key.split("iOS-")[-1].split("-") if n.isdigit()]
+          for key in sorted((k for k in runtimes if "iOS-" in k), key=version, reverse=True):
+              names = [d for d in runtimes[key] if d["name"].startswith(want) and must in d["name"]]
+              plain = [d for d in names if "Max" not in d["name"] and "Plus" not in d["name"] and "mini" not in d["name"]]
+              if names:
+                  print((plain or names)[0]["udid"])
+                  break
+          ' "$1" "$2"
+          }
+          echo "PHONE=$(pick 'iPhone 1' '')" >> "$GITHUB_ENV"
+          echo "PAD=$(pick 'iPad' '11-inch')" >> "$GITHUB_ENV"
+          echo "BIGPAD=$(pick 'iPad' '13-inch')" >> "$GITHUB_ENV"
+
+      - name: Build for the simulator
+        run: |
+          set -o pipefail
+          test -n "$PHONE"
+          xcodebuild build \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$PHONE" \
+            -derivedDataPath "$RUNNER_TEMP/sim" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RUNNER_TEMP/sim.log" | xcbeautify --quiet
+
+      # -curtainWait מחזיק את הפריים הראשון ו-curtainHold את המסך כולו (SceneDelegate.swift),
+      # כדי שהפתיחה תיכנס לצילומים: הפריים הראשון, המסך המלא, ואז הדף של המערכת
+      - name: Launch and record
+        timeout-minutes: 20
+        run: |
+          APP=$(find "$RUNNER_TEMP/sim/Build/Products" -maxdepth 2 -name 'App.app' | head -1)
+          test -d "$APP"
+          mkdir -p launch
+          look() {
+            name=$1; device=$2
+            [ -n "$device" ] || { echo "no $name simulator"; return 0; }
+            xcrun simctl boot "$device" || true
+            xcrun simctl bootstatus "$device" -b
+            xcrun simctl install "$device" "$APP"
+            # ההקלטה נסגרת ב-SIGINT, ותהליך רקע של סקריפט מתעלם ממנו: מחזירים לו את ברירת המחדל
+            python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+              xcrun simctl io "$device" recordVideo --codec=h264 --force "launch/$name.mp4" 2> "launch/$name.log" &
+            recorder=$!
+            # ההקלטה מתחילה רק כמה שניות אחרי הפקודה: מחכים לה, אחרת הפתיחה לא בסרטון
+            for i in $(seq 1 60); do
+              grep -q "Recording started" "launch/$name.log" 2>/dev/null && break
+              sleep 0.5
+            done
+            sleep 1
+            xcrun simctl launch "$device" il.co.all4fun.atb -curtainWait 3 -curtainHold 10
+            sleep 1.5
+            xcrun simctl io "$device" screenshot "launch/$name-1-first.png" || true
+            sleep 5
+            xcrun simctl io "$device" screenshot "launch/$name-2-curtain.png" || true
+            sleep 8
+            xcrun simctl io "$device" screenshot "launch/$name-3-page.png" || true
+            kill -INT "$recorder" || true
+            for i in $(seq 1 15); do
+              kill -0 "$recorder" 2>/dev/null || break
+              sleep 1
+            done
+            kill -9 "$recorder" 2>/dev/null || true
+            xcrun simctl shutdown "$device" || true
+          }
+          look phone "$PHONE"
+          look pad "$PAD"
+          look bigpad "$BIGPAD"
+          ls -la launch
+
+      - name: Keep what was recorded
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch
+          path: launch
+          if-no-files-found: warn
+
+      - name: Show the end of the build log
+        if: failure()
+        run: tail -n 150 "$RUNNER_TEMP/sim.log" || true

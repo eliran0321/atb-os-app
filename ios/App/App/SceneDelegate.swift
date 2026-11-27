@@ -35,6 +35,14 @@ class MainViewController: CAPBridgeViewController {
     private let ink = UIColor(red: 42 / 255, green: 18 / 255, blue: 71 / 255, alpha: 1)
     private var windowOpener: SameAppWindowOpener?
 
+    // The curtain over the first seconds (LaunchCurtain below), and when it goes.
+    private var curtain: LaunchCurtain?
+    private var curtainSince: CFTimeInterval = 0
+    private var pageBegan = false
+    private var pageLoading: NSKeyValueObservation?
+    /// The message with which the first page says that it has drawn itself.
+    private static let drawnMessage = "atbPageDrawn"
+
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
         // The sign-in key of this device, for the page to use (BiometricKeyPlugin below).
@@ -45,6 +53,63 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(WebAuthPlugin())
 
         guard let webView = webView else { return }
+
+        // The first page says when it is there to look at: its content is in place, its
+        // images are decoded, what it brings in when it opens (a rise, a fade) has ended,
+        // and two frames have been drawn since. Each of these was missing once, and each
+        // time the curtain left a hole behind it: a blank page, a page without its logo,
+        // a page caught in the middle of its entrance. It does not wait for the end of
+        // the whole load: on a slow network the scripts of a page keep coming long after
+        // it is on screen, and the curtain stood in front of a finished page.
+        // The curtain over the launch goes then (coverLaunch below). Once it is gone
+        // nobody listens, and the script finds no listener and does nothing.
+        let drawn = """
+        (function () {
+          var handlers = window.webkit && window.webkit.messageHandlers;
+          var listener = handlers && handlers.\(Self.drawnMessage);
+          if (!listener) return;
+          function within(ms, promise) {
+            return Promise.race([promise, new Promise(function (resolve) { setTimeout(resolve, ms); })]);
+          }
+          function images() {
+            var now = Array.prototype.filter.call(document.images, function (img) {
+              return img.loading !== 'lazy';
+            });
+            return Promise.all(now.map(function (img) {
+              return img.decode ? img.decode().catch(function () {}) : null;
+            }));
+          }
+          function entrance() {
+            var all = document.getAnimations ? document.getAnimations() : [];
+            var entering = all.filter(function (a) {
+              var timing = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : null;
+              return timing && isFinite(timing.endTime) && a.playState !== 'finished';
+            });
+            return Promise.all(entering.map(function (a) {
+              return a.finished.catch(function () {});
+            }));
+          }
+          function frames() {
+            return new Promise(function (resolve) {
+              requestAnimationFrame(function () { requestAnimationFrame(resolve); });
+            });
+          }
+          function settle() {
+            within(4000, images())
+              .then(function () { return within(3000, entrance()); })
+              .then(frames)
+              .then(function () { listener.postMessage(location.pathname); });
+          }
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', settle, { once: true });
+          } else {
+            settle();
+          }
+        })();
+        """
+        let scripts = webView.configuration.userContentController
+        scripts.addUserScript(WKUserScript(source: drawn, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        scripts.add(PageListener { [weak self] path in self?.firstPageDrawn(path) }, name: Self.drawnMessage)
 
         // There is no back button in the shell: an edge swipe goes back, as in the browser.
         webView.allowsBackForwardNavigationGestures = true
@@ -75,6 +140,425 @@ class MainViewController: CAPBridgeViewController {
             strip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             strip.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
         ])
+
+        coverLaunch()
+    }
+
+    /// The web view starts empty, and the first page comes over the network. Until it
+    /// is on screen the curtain stands in front of the web view.
+    private func coverLaunch() {
+        guard let webView = webView else { return }
+        let curtain = LaunchCurtain(frame: view.bounds)
+        curtain.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(curtain)
+        self.curtain = curtain
+        curtainSince = CACurrentMediaTime()
+
+        // The load has already begun by now (super.viewDidLoad starts it), hence .initial.
+        pageLoading = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, _ in
+            let loading = webView.isLoading
+            DispatchQueue.main.async { self?.pageIsLoading(loading) }
+        }
+        // Whatever happens to the page, the curtain does not stay for ever. But it does
+        // stay through a slow network: when it went after 12 seconds, and then after 30,
+        // a page that took longer left the blank screen in between. A load that gets
+        // nowhere is given up by the web view after a minute, and then the offline page
+        // reports like any other; this is only for what nobody thought of.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
+            self?.uncover()
+        }
+    }
+
+    /// The page is all there (the script in capacitorDidLoad), and the curtain can go.
+    private func firstPageDrawn(_ path: String) {
+        liftCurtain(after: 0.1)
+    }
+
+    /// The end of the load is the second sign, for a page that did not report. It comes
+    /// before the page is on screen, so it is only a net: a few seconds later, and only
+    /// if the web view is still at rest then. A failed load is followed at once by the
+    /// offline page, and a redirect by the next page, and each of them reports again.
+    private func pageIsLoading(_ loading: Bool) {
+        if loading {
+            pageBegan = true
+            return
+        }
+        guard pageBegan, curtain != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self = self, self.webView?.isLoading == false else { return }
+            self.liftCurtain(after: 0)
+        }
+    }
+
+    /// Not before the opening had time to play, also when the page is already there.
+    /// `-curtainHold <seconds>` at launch keeps the curtain longer, to look at it in the
+    /// simulator (.github/workflows/ios-check.yml). Nobody else passes it.
+    private func liftCurtain(after settle: CFTimeInterval) {
+        guard curtain != nil else { return }
+        let least = max(1.0, UserDefaults.standard.double(forKey: "curtainHold"))
+        let left = least - (CACurrentMediaTime() - curtainSince)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(settle, left)) { [weak self] in
+            self?.uncover()
+        }
+    }
+
+    private func uncover() {
+        guard let curtain = curtain else { return }
+        self.curtain = nil
+        pageLoading = nil
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.drawnMessage)
+        curtain.lift()
+    }
+}
+
+/// Hands a message of the page to a closure. The web view holds its listeners strongly,
+/// so the screen itself is not one.
+final class PageListener: NSObject, WKScriptMessageHandler {
+    private let hear: (String) -> Void
+
+    init(_ hear: @escaping (String) -> Void) {
+        self.hear = hear
+        super.init()
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        hear(message.body as? String ?? "")
+    }
+}
+
+/// The first seconds of the app. The web view starts empty, and until the first page of
+/// the system arrived the app was a blank ink screen. The curtain covers that time: the
+/// logo starts exactly where the launch screen of iOS drew it and rises, the elephant
+/// of ATB comes up under it, and a bowling ball rolls by for as long as the page takes.
+///
+/// It is the opening page of the system (/start) without its two tiles, measured the
+/// way the page measures itself, so for someone who is not signed in the tiles simply
+/// appear under the elephant. Someone who is signed in goes from it to the home screen.
+final class LaunchCurtain: UIView {
+    /// The logo on the launch image: 720 px on a 2732 px square that fills the screen
+    /// (scripts/make-assets.mjs).
+    private static let launchLogoShare: CGFloat = 720.0 / 2732.0
+    private static let ink = UIColor(red: 42 / 255, green: 18 / 255, blue: 71 / 255, alpha: 1)
+    /// The faint balls at the edges of the opening page: the middle in percent of the
+    /// page, the size in percent of the short side of the screen, and the turn of the holes.
+    private static let edgeBalls: [(x: CGFloat, y: CGFloat, size: CGFloat, turn: CGFloat)] = [
+        (-5, 31, 36, 20), (103, 15, 24, 140), (99, 60, 13, 260)
+    ]
+
+    /// What the page draws behind everything, cut at the edges of the page as there.
+    private let backdrop = CALayer()
+    private let glowTop = CAGradientLayer()
+    private let glowBottom = CAGradientLayer()
+    private let balls = LaunchCurtain.edgeBalls.map { _ in BowlingBall(ink: LaunchCurtain.ink.cgColor) }
+    private let logo = UIImageView(image: UIImage(named: "Logo"))
+    /// The elephant and the light behind it: they come up together.
+    private let stage = UIView()
+    private let spotlight = CAGradientLayer()
+    private let elephant = UIImageView(image: UIImage(named: "Elephant"))
+    private let roller = BowlingBall(ink: LaunchCurtain.ink.cgColor)
+
+    private var playing = false
+    /// Where the rolling ball starts and ends, and how far it turns on the way.
+    private var roll: (from: CGFloat, to: CGFloat, turn: CGFloat) = (0, 0, 0)
+
+    private static func color(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> CGColor {
+        return UIColor(red: red / 255, green: green / 255, blue: blue / 255, alpha: alpha).cgColor
+    }
+
+    /// A round light: the colors run from the middle of the layer to its edge.
+    private static func light(_ layer: CAGradientLayer, _ colors: [CGColor], _ stops: [NSNumber]) {
+        layer.type = .radial
+        layer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        layer.endPoint = CGPoint(x: 1, y: 1)
+        layer.colors = colors
+        layer.locations = stops
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = Self.ink
+        clipsToBounds = true
+
+        // The two purple lights in the corners of the page, and its faint balls.
+        Self.light(glowTop, [Self.color(139, 92, 246, 0.42), Self.color(139, 92, 246, 0)], [0, 0.7])
+        Self.light(glowBottom, [Self.color(124, 58, 237, 0.38), Self.color(124, 58, 237, 0)], [0, 0.7])
+        backdrop.masksToBounds = true
+        backdrop.addSublayer(glowTop)
+        backdrop.addSublayer(glowBottom)
+        for (ball, spec) in zip(balls, Self.edgeBalls) {
+            ball.layer.opacity = 0.13
+            ball.holes.setAffineTransform(CGAffineTransform(rotationAngle: spec.turn * .pi / 180))
+            backdrop.addSublayer(ball.layer)
+        }
+        layer.addSublayer(backdrop)
+
+        logo.contentMode = .scaleAspectFit
+        addSubview(logo)
+
+        Self.light(
+            spotlight,
+            [Self.color(196, 181, 253, 0.5), Self.color(139, 92, 246, 0.42),
+             Self.color(109, 40, 217, 0.16), Self.color(109, 40, 217, 0)],
+            [0, 0.38, 0.68, 1]
+        )
+        stage.layer.addSublayer(spotlight)
+        elephant.contentMode = .scaleAspectFit
+        // It breathes from its feet, which stay on the ground.
+        elephant.layer.anchorPoint = CGPoint(x: 0.5, y: 1)
+        elephant.layer.shadowColor = Self.color(10, 4, 20)
+        elephant.layer.shadowOpacity = 0.6
+        elephant.layer.shadowRadius = 9
+        elephant.layer.shadowOffset = CGSize(width: 0, height: 16)
+        stage.addSubview(elephant)
+        addSubview(stage)
+
+        roller.layer.shadowColor = Self.color(10, 4, 20)
+        roller.layer.shadowOpacity = 0.5
+        roller.layer.shadowRadius = 7
+        roller.layer.shadowOffset = CGSize(width: 0, height: 6)
+        layer.addSublayer(roller.layer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        setNeedsLayout()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        setNeedsLayout()
+    }
+
+    /// The numbers are the numbers of the opening page (src/app/start/page.tsx in the
+    /// system), measured the way the web view measures them: the page is the screen
+    /// without the safe areas, "vw" and "vh" are the whole screen, and one "rem" is
+    /// 15 points on a phone and 16 on anything wider (globals.css).
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = bounds.width
+        let height = bounds.height
+        guard width > 0, height > 0 else { return }
+        let safe = safeAreaInsets
+        let page = CGRect(x: safe.left, y: safe.top,
+                          width: width - safe.left - safe.right,
+                          height: height - safe.top - safe.bottom)
+        // A wide screen has everything together in the middle; a tablet standing up has
+        // the layout of a phone with larger pieces.
+        let wide = page.width >= 1024
+        let tablet = page.width >= 640 && !wide
+        let rem: CGFloat = page.width < 640 ? 15 : 16
+        // A phone on its side has no room for the elephant.
+        let low = page.height <= 520
+
+        let top = max(2 * rem, 0.06 * height)
+        let foot = 1.75 * rem
+        // A tile is as tall as what is in it: the badge, the word (28 points), the gaps.
+        let tiles = tablet ? max(11 * rem, 9.5 * rem + 28) : max(9 * rem, 7.75 * rem + 28)
+        // How far the elephant sits into the tiles.
+        let sink = (tablet ? 2.5 : 2) * rem
+        let elephantWidth = low ? 0
+            : (tablet ? min(0.58 * width, 0.40 * height, 28 * rem) : min(0.76 * width, 0.38 * height, 21 * rem))
+        let elephantHeight = elephantWidth * 841 / 720
+        let elephantRoom = max(0, elephantHeight - sink)
+        let logoHeight = tablet ? min(max(7 * rem, 0.16 * height), 12 * rem)
+            : min(max(5.5 * rem, 0.17 * height), 9 * rem)
+        let logoWidth = logoHeight * 1816 / 1159
+        let lightSize = tablet ? min(0.96 * width, 0.58 * height, 44 * rem)
+            : min(1.08 * width, 0.54 * height, 30 * rem)
+
+        let tilesTop: CGFloat
+        let logoMiddle: CGFloat
+        if wide {
+            let gap = 3 * rem
+            let block = logoHeight + gap + elephantRoom + tiles
+            let blockTop = page.minY + top + (page.height - top - foot - block) / 2
+            logoMiddle = blockTop + logoHeight / 2
+            tilesTop = blockTop + logoHeight + gap + elephantRoom
+        } else {
+            tilesTop = page.maxY - foot - tiles
+            logoMiddle = (page.minY + top + tilesTop - elephantRoom) / 2
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backdrop.frame = page
+        glowTop.frame = CGRect(x: page.width - 34 * rem, y: -26 * rem, width: 68 * rem, height: 52 * rem)
+        glowBottom.frame = CGRect(x: -30 * rem, y: page.height - 24 * rem, width: 60 * rem, height: 48 * rem)
+        for (ball, spec) in zip(balls, Self.edgeBalls) {
+            ball.resize(spec.size / 100 * min(width, height))
+            ball.layer.position = CGPoint(x: spec.x / 100 * page.width, y: spec.y / 100 * page.height)
+        }
+
+        logo.bounds = CGRect(x: 0, y: 0, width: logoWidth, height: logoHeight)
+        logo.center = CGPoint(x: page.midX, y: logoMiddle)
+
+        stage.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        stage.center = CGPoint(x: width / 2, y: height / 2)
+        stage.isHidden = low
+        elephant.bounds = CGRect(x: 0, y: 0, width: elephantWidth, height: elephantHeight)
+        elephant.center = CGPoint(x: page.midX, y: tilesTop + sink)
+        spotlight.frame = CGRect(x: page.midX - lightSize / 2,
+                                 y: tilesTop - 0.06 * elephantRoom - lightSize,
+                                 width: lightSize, height: lightSize)
+
+        // The ball rolls where the two tiles of the page will be. Between two passes it
+        // waits out of sight, on the right.
+        let rollerSize: CGFloat = page.width < 640 ? 48 : 64
+        roller.layer.isHidden = low
+        roller.resize(rollerSize)
+        roller.layer.position = CGPoint(x: width + rollerSize, y: tilesTop + tiles / 2)
+        CATransaction.commit()
+
+        roll = (width + rollerSize, -rollerSize, -(width + 2 * rollerSize) / (rollerSize / 2))
+        if window != nil, !playing {
+            playing = true
+            play()
+        }
+    }
+
+    /// The first frame is the launch screen of iOS: only the logo, in the middle, at
+    /// its size there. From it the logo rises to its place and the rest comes in.
+    private func play() {
+        let launchWidth = Self.launchLogoShare * max(bounds.width, bounds.height)
+        let grow = launchWidth / max(logo.bounds.width, 1)
+        logo.transform = CGAffineTransform(translationX: bounds.midX - logo.center.x, y: bounds.midY - logo.center.y)
+            .scaledBy(x: grow, y: grow)
+        stage.alpha = 0
+        stage.transform = CGAffineTransform(translationX: 0, y: 14).scaledBy(x: 0.97, y: 0.97)
+
+        // `-curtainWait <seconds>` at launch holds the first frame, to look at it in the
+        // simulator (.github/workflows/ios-check.yml). Nobody else passes it.
+        let wait = max(0, UserDefaults.standard.double(forKey: "curtainWait"))
+
+        // The curve of the opening page (start-rise).
+        let rise = UICubicTimingParameters(
+            controlPoint1: CGPoint(x: 0.23, y: 1), controlPoint2: CGPoint(x: 0.32, y: 1)
+        )
+        let logoUp = UIViewPropertyAnimator(duration: 0.62, timingParameters: rise)
+        logoUp.addAnimations { self.logo.transform = .identity }
+        logoUp.startAnimation(afterDelay: wait + 0.12)
+        let stageUp = UIViewPropertyAnimator(duration: 0.56, timingParameters: rise)
+        stageUp.addAnimations {
+            self.stage.alpha = 1
+            self.stage.transform = .identity
+        }
+        stageUp.startAnimation(afterDelay: wait + 0.26)
+
+        let now = layer.convertTime(CACurrentMediaTime(), from: nil) + wait
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = 0.7
+        fade.beginTime = now + 0.1
+        fade.fillMode = .backwards
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        backdrop.add(fade, forKey: "in")
+
+        // With "Reduce Motion" on, things come in and then stand still.
+        if UIAccessibility.isReduceMotionEnabled { return }
+
+        // start-breathe of the opening page: 4.5 seconds for a breath in and out.
+        let breath = CABasicAnimation(keyPath: "transform.scale")
+        breath.fromValue = 1
+        breath.toValue = 1.025
+        breath.duration = 2.25
+        breath.autoreverses = true
+        breath.repeatCount = .infinity
+        breath.beginTime = now + 0.9
+        breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        elephant.layer.add(breath, forKey: "breath")
+
+        // One pass from right to left, turning as far as a rolling ball turns, then a
+        // short wait out of sight.
+        let pass: CFTimeInterval = 1.7
+        let ease = CAMediaTimingFunction(controlPoints: 0.45, 0.05, 0.55, 0.95)
+        let move = CABasicAnimation(keyPath: "position.x")
+        move.fromValue = roll.from
+        move.toValue = roll.to
+        let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+        turn.fromValue = 0
+        turn.toValue = roll.turn
+        let steps: [(CALayer, CABasicAnimation)] = [(roller.layer, move), (roller.holes, turn)]
+        for (target, step) in steps {
+            step.duration = pass
+            step.timingFunction = ease
+            let loop = CAAnimationGroup()
+            loop.animations = [step]
+            loop.duration = pass + 0.6
+            loop.repeatCount = .infinity
+            loop.beginTime = now + 0.85
+            target.add(loop, forKey: "roll")
+        }
+    }
+
+    /// The page is on: the curtain fades and leaves.
+    func lift() {
+        isUserInteractionEnabled = false
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .beginFromCurrentState], animations: {
+            self.alpha = 0
+        }, completion: { _ in
+            self.removeFromSuperview()
+        })
+    }
+}
+
+/// The bowling ball of the system (clock/bowling-balls.tsx): a glossy purple ball with
+/// three holes and a shine. The holes are a layer of their own, so that they can turn
+/// while the shine stays on top.
+final class BowlingBall {
+    let layer = CALayer()
+    let holes = CALayer()
+    private let body = CAGradientLayer()
+    private let spots = [CALayer(), CALayer(), CALayer()]
+    private let shine = CAShapeLayer()
+
+    init(ink: CGColor) {
+        body.type = .radial
+        body.startPoint = CGPoint(x: 0.34, y: 0.28)
+        body.endPoint = CGPoint(x: 1.12, y: 1.06)
+        body.colors = [
+            UIColor(red: 237 / 255, green: 233 / 255, blue: 254 / 255, alpha: 1).cgColor,
+            UIColor(red: 167 / 255, green: 139 / 255, blue: 250 / 255, alpha: 1).cgColor,
+            UIColor(red: 124 / 255, green: 58 / 255, blue: 237 / 255, alpha: 1).cgColor,
+            UIColor(red: 59 / 255, green: 7 / 255, blue: 100 / 255, alpha: 1).cgColor
+        ]
+        body.locations = [0, 0.3, 0.7, 1]
+        body.masksToBounds = true
+        layer.addSublayer(body)
+        for spot in spots {
+            spot.backgroundColor = ink
+            holes.addSublayer(spot)
+        }
+        layer.addSublayer(holes)
+        shine.fillColor = UIColor(white: 1, alpha: 0.4).cgColor
+        layer.addSublayer(shine)
+    }
+
+    /// The drawing is on a 100 by 100 square: the body is a circle of radius 48, the
+    /// holes are at (41, 32), (59, 32) and (50, 50), the shine at (32, 24).
+    func resize(_ size: CGFloat) {
+        let unit = size / 100
+        layer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        body.frame = CGRect(x: 2 * unit, y: 2 * unit, width: 96 * unit, height: 96 * unit)
+        body.cornerRadius = 48 * unit
+        holes.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        holes.position = CGPoint(x: size / 2, y: size / 2)
+        let places: [(x: CGFloat, y: CGFloat, radius: CGFloat)] = [(41, 32, 5.5), (59, 32, 5.5), (50, 50, 6.8)]
+        for (spot, place) in zip(spots, places) {
+            let radius = place.radius * unit
+            spot.bounds = CGRect(x: 0, y: 0, width: 2 * radius, height: 2 * radius)
+            spot.position = CGPoint(x: place.x * unit, y: place.y * unit)
+            spot.cornerRadius = radius
+        }
+        shine.bounds = CGRect(x: 0, y: 0, width: 26 * unit, height: 14 * unit)
+        shine.position = CGPoint(x: 32 * unit, y: 24 * unit)
+        shine.path = UIBezierPath(ovalIn: shine.bounds).cgPath
+        shine.setAffineTransform(CGAffineTransform(rotationAngle: -32 * .pi / 180))
     }
 }
 
