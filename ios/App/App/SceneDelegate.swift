@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import QuickLook
+import AuthenticationServices
 import LocalAuthentication
 import Security
 import Capacitor
@@ -40,6 +41,8 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(BiometricKeyPlugin())
         // A file of the system (an Excel export, a PDF), shown by the device (FileViewerPlugin below).
         bridge?.registerPluginInstance(FileViewerPlugin())
+        // A sign-in page of another service, in the sheet of the system (WebAuthPlugin below).
+        bridge?.registerPluginInstance(WebAuthPlugin())
 
         guard let webView = webView else { return }
 
@@ -318,5 +321,77 @@ extension FileViewerPlugin: QLPreviewControllerDataSource {
     public func previewController(_ controller: QLPreviewController,
                                   previewItemAt index: Int) -> QLPreviewItem {
         return (shown ?? folder) as NSURL
+    }
+}
+
+/// The sign-in page of another service, shown by the device above the app: Google's
+/// consent screen when a user connects a calendar. Google refuses to show it inside a
+/// web view, and a jump to Safari leaves the session of the system behind. The sheet of
+/// the system is a real browser, with the Google accounts that are already signed in on
+/// the phone, and it hands the answer back to the page that asked.
+///
+/// As with the other two, the plugin knows nothing about Google or calendars: it opens
+/// an address and returns the address the visit ended on. Which address, and what to do
+/// with the answer, is decided in the web app.
+@objc(WebAuthPlugin)
+public class WebAuthPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "WebAuthPlugin"
+    public let jsName = "WebAuth"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise)
+    ]
+
+    /// Held while the sheet is up: the system closes a sheet that nothing holds.
+    private var session: ASWebAuthenticationSession?
+    private var round = 0
+
+    /// `url`: the page to open, https only. `scheme`: the visit ends when the page is
+    /// sent to an address of this scheme, and that address is the answer.
+    @objc func start(_ call: CAPPluginCall) {
+        guard let text = call.getString("url"), let url = URL(string: text),
+              url.scheme == "https",
+              let scheme = call.getString("scheme"), !scheme.isEmpty else {
+            call.reject("url", "FAILED")
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                call.reject("no screen", "FAILED")
+                return
+            }
+            // One sheet at a time: a new one closes the previous, which answers CANCELED.
+            self.session?.cancel()
+            self.round += 1
+            let round = self.round
+            let session = ASWebAuthenticationSession(
+                url: url, callbackURLScheme: scheme
+            ) { [weak self] back, error in
+                DispatchQueue.main.async {
+                    if let self = self, self.round == round { self.session = nil }
+                }
+                if let back = back {
+                    call.resolve(["url": back.absoluteString])
+                    return
+                }
+                // The number tells a closed sheet (1) from a sheet that could not open.
+                let canceled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                let number = (error as NSError?)?.code ?? 0
+                call.reject("not finished \(number)", canceled ? "CANCELED" : "FAILED")
+            }
+            session.presentationContextProvider = self
+            self.session = session
+            if !session.start() {
+                self.session = nil
+                call.reject("not started", "FAILED")
+            }
+        }
+    }
+}
+
+// The conformance lives in an extension, as with the two above: only this method runs
+// on the main actor, and start(_:) stays callable from the bridge queue.
+extension WebAuthPlugin: ASWebAuthenticationPresentationContextProviding {
+    public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        return bridge?.viewController?.view.window ?? ASPresentationAnchor()
     }
 }
