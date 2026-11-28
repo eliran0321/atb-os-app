@@ -21,6 +21,10 @@ const env = Object.fromEntries(
     .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1).replace(/^"|"$/g, '')]),
 )
 
+/** לקוח בתפקיד השירות, לקריאה מהמסד בלי דפדפן (submit.mjs) */
+export const serviceDb = () =>
+  createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+
 /** סשן של הבעלים (QA_OWNER_ID) בקישור קסם, מאומת כמו מכשיר מוכר. logout מקומי בלבד */
 export async function login() {
   const admin = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
